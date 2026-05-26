@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Local Qdrant vector store (persisted to disk by the app)
+qdrant_storage/
+
+# Uploaded / temp documents — keep personal policy PDFs out of the repo
+uploads/
+*.pdf
+*.docx
+*.doc
+*.txt
+!requirements.txt
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

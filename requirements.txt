@@ -5,10 +5,11 @@ streamlit>=1.30.0
 langchain-core>=0.2.0
 langchain-community>=0.2.0
 langchain-text-splitters>=0.2.0
+langchain-openai>=0.1.0
 langchain-ollama>=0.1.0
 
 # Vector store
-qdrant-client>=1.9.0
+chromadb>=0.4.22
 
 # Document loaders
 pypdf>=4.0.0

@@ -1,174 +1,149 @@
-# BFSI Policy Assistant: Low-Level Design
+# BFSI Policy Assistant: LLD
 
-> Version 1.0 - describes the implementation in `app.py` as it stands today.
-
-## 1. Architecture overview
+## How the pieces fit
 
 ```
-+-------------+      +-----------------+      +---------------+
-| Streamlit   | ---> | Document        | ---> | Hierarchical  |
-| File upload |      | loaders         |      | chunker       |
-+-------------+      +-----------------+      +-------+-------+
+upload --> loaders --> heading-aware chunker --> char-level chunker
                                                       |
                                                       v
-                     +-----------------+      +-----------------+
-                     | Ollama          | <--- | OptimizedChroma |
-                     | (llama3 embed)  |      | DBManager       |
-                     +-----------------+      +-----------------+
+                              local Ollama embeddings (llama3)
                                                       |
                                                       v
-+-------------+      +-----------------+      +-----------------+
-| Streamlit   | ---> | OptimizedRetri- | ---> | Chroma          |
-| Chat input  |      | ever            | <--- | persisted store |
-+-------------+      +-------+---------+      +-----------------+
-                             |
-                             v
-                     +-----------------+
-                     | OpenRouter      |
-                     | (Mistral 7B)    |
-                     +-----------------+
-                             |
-                             v
-                     +-----------------+
-                     | Streamlit       |
-                     | Chat output     |
-                     +-----------------+
+                                  Chroma at ./chroma_db_storage
+                                                      ^
+                                                      |
+question --> query expansion --> sim + MMR retrieval -+
+                                                      |
+                                                      v
+                         dedupe + rerank (term overlap + heading bonus)
+                                                      |
+                                                      v
+                          top 15 chunks + question --> OpenRouter (Mistral 7B)
+                                                      |
+                                                      v
+                                                  Streamlit
 ```
 
-## 2. Modules in `app.py`
+Everything lives in one file (`app.py`). I considered splitting into modules. For around 500 lines it's not worth the navigation cost.
 
-| Module / Class | Responsibility |
-|---|---|
-| `get_llm(temperature)` | Build a `ChatOpenAI` client pointed at OpenRouter; halt with a clear UI error if `OPENROUTER_API_KEY` is missing |
-| `OptimizedChromaDBManager` | Own the Chroma vectorstore lifecycle: close, create with batched persist, wipe |
-| `HierarchicalChunker.split_by_headings` | Detect headings by regex, group lines into sections, attach `heading` to each section's metadata |
-| `HierarchicalChunker.smart_chunking` | For sections longer than 1.5x `CHUNK_SIZE`, apply `RecursiveCharacterTextSplitter` |
-| `OptimizedRetriever._smart_query_expansion` | Build up to 5 query variants from the question's keywords |
-| `OptimizedRetriever.get_comprehensive_context` | Run similarity + MMR over the first 3 variants, dedupe by MD5, re-rank by term overlap and heading bonus, return the top-15 chunks plus a sources list |
-| `load_document_with_pages` | Dispatch to `PyPDFLoader`, `Docx2txtLoader`, or `TextLoader`; attach a page number per fragment |
-| `process_documents` | Save uploads to temp files, load, attach uniform metadata, run the chunker, return chunks and per-file stats |
+## The classes that matter
 
-## 3. Configuration constants
+`OptimizedChromaDBManager` owns the Chroma vectorstore's lifecycle: create, close, wipe. The "optimized" prefix is leftover from an earlier round; what it actually does is batch the persist calls and gc between batches, because building the store in one shot blows up memory at 5000+ chunks. It also retries `shutil.rmtree` up to 5 times with a 1-second backoff, because Windows holds file locks for a few seconds after Chroma releases them.
 
-| Constant | Value | Reason |
-|---|---|---|
-| `DB_DIR` | `./chroma_db_storage` | Persistence path for the Chroma collection |
-| `COLLECTION_NAME` | `bfsi_documents_full` | One fixed collection at a time |
-| `MODEL_NAME` | `mistralai/mistral-7b-instruct-v0.1` | Free-tier model on OpenRouter |
-| `EMBEDDING_MODEL` | `llama3` | Local Ollama embedding model |
-| `MAX_CANDIDATE_CHUNKS` | 60 | Upper bound on candidates fetched before re-ranking |
-| `FINAL_CONTEXT_CHUNKS` | 15 | Top-k after re-ranking; balances recall and prompt size |
-| `CHUNK_SIZE` | 600 chars | Smaller than typical (1000) because BFSI policy text is dense |
-| `CHUNK_OVERLAP` | 150 chars | Preserves sentence boundaries across cuts |
-| `BATCH_SIZE` | 50 | Per-batch embed and add, to bound memory |
+`HierarchicalChunker` does two passes. `split_by_headings` walks the document line by line and groups lines under the most recent detected heading. The heading regex is:
 
-## 4. Data shapes
+```python
+[
+    r'^\d+\.\s+',                              # "1. Foo"
+    r'^\d+\.\d+\.\s+',                          # "2.3. Bar"
+    r'^[A-Z][A-Z\s]{3,}$',                      # "ALL CAPS HEADING"
+    r'^[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*:$',       # "Section Title:"
+]
+```
 
-### 4.1 Chunk metadata
+Anything matching, and shorter than 100 chars, is treated as a heading. The 100-char cap is a hack to prevent body lines that happen to start with a number from being treated as section heads.
+
+`smart_chunking` then runs RecursiveCharacterTextSplitter on any section longer than 900 chars (1.5 times CHUNK_SIZE). Shorter sections are left whole, which keeps short clauses (a one-paragraph "Definitions" section, say) coherent.
+
+`OptimizedRetriever` is the one to read carefully. The interesting bit is `_smart_query_expansion`: from a question like "what is the cancellation window for term insurance", it generates:
+
+1. The full question.
+2. The top-2 keyword pair: "cancellation window".
+3. The top-3 keyword triple: "cancellation window term".
+4. Individual long keywords: "cancellation", "insurance".
+
+Capped at 5 variants, of which the first 3 are actually run through retrieval. The cap is empirical; beyond 3 the marginal recall stops paying for the latency.
+
+After retrieval, candidates are deduped by `md5(chunk.page_content)`, then re-ranked. The rerank score is the count of question terms (filtered against a 19-word stopword set, minimum length 3) appearing in the chunk, plus 3 if the chunk has a parent heading. I considered cross-encoder reranking; for v1 the term-overlap + heading bonus does well enough and adds zero dependencies.
+
+## Constants worth knowing
+
+```
+DB_DIR              = "./chroma_db_storage"
+COLLECTION_NAME     = "bfsi_documents_full"
+MODEL_NAME          = "mistralai/mistral-7b-instruct-v0.1"
+EMBEDDING_MODEL     = "llama3"
+MAX_CANDIDATE_CHUNKS = 60   # candidates fetched before rerank
+FINAL_CONTEXT_CHUNKS = 15   # what actually goes into the prompt
+CHUNK_SIZE          = 600
+CHUNK_OVERLAP       = 150
+BATCH_SIZE          = 50    # embed and add this many at a time
+```
+
+`CHUNK_SIZE = 600` is the one tuned specifically for BFSI. The default in tutorials is 1000. Policy text packs more meaning per character than prose, so 600 keeps each chunk to roughly one self-contained clause.
+
+`FINAL_CONTEXT_CHUNKS = 15` times 600 chars works out to about 9000 chars, roughly 2200 tokens. Mistral 7B Instruct's context is 8K. That leaves around 5800 tokens for the prompt template and the answer. Comfortable.
+
+## What gets carried in metadata
 
 ```python
 {
     "source_name": "policy_xyz.pdf",
-    "file_type": "PDF" | "DOCX" | "TXT",
+    "file_type": "PDF",
     "doc_id": "<uuid4>",
-    "processed_date": "YYYY-MM-DD HH:MM:SS",
-    "page": int | None,
-    "heading": str | None,
+    "processed_date": "2026-06-13 14:22:08",
+    "page": 3,
+    "heading": "4.2 Cancellation Window",
 }
 ```
 
-### 4.2 Retrieved context block (string sent to the LLM)
+`source_name` and `page` end up in citations. `heading` ends up in the rerank score and in citations. `doc_id` and `processed_date` are for debugging multi-file uploads; nothing user-facing uses them.
 
-```
-**Excerpt 1**
-Document: policy_xyz.pdf | Page 3 | Section: 4.2 Cancellation Window
-<chunk text>
+## The two paths through the system
 
----
+### Loading a corpus
 
-**Excerpt 2**
-Document: policy_xyz.pdf | Page 7 | Section: 5.1 Refund Eligibility
-<chunk text>
-```
-
-### 4.3 Session state keys
-
-| Key | Type | Lifetime |
-|---|---|---|
-| `retriever` | `OptimizedRetriever \| None` | Per session |
-| `documents_loaded` | bool | Per session |
-| `db_manager` | `OptimizedChromaDBManager` | Per session |
-| `messages` | list of `{role, content, sources}` | Per session |
-| `total_chunks` | int | Per session |
-| `file_stats` | list of `{name, pages, type}` | Per session |
-
-## 5. Sequence: load documents
-
-1. UI: user uploads up to 5 files and clicks "Load Documents".
-2. `process_documents`: for each file, write to OS temp, dispatch to the right loader, attach metadata.
-3. `HierarchicalChunker.split_by_headings`: regex-detect section heads, group lines, attach `heading`.
-4. `HierarchicalChunker.smart_chunking`: re-split any section larger than `CHUNK_SIZE * 1.5`.
+1. User drops up to 5 files into the uploader, clicks Load.
+2. For each file: write to OS temp, dispatch to the right loader, stamp metadata.
+3. `split_by_headings` walks every doc, attaching `heading`.
+4. `smart_chunking` re-splits oversize sections.
 5. `OptimizedChromaDBManager.create_vectorstore`:
-   1. Close any current store; gc.
-   2. `shutil.rmtree(DB_DIR)` with up to 5 retries (handles Windows file locks).
-   3. Create the store from the first batch of 50 chunks.
-   4. For remaining chunks, call `add_documents` in batches of 50, with a progress bar.
-6. Wrap the store in `OptimizedRetriever`; persist in session state.
+   - Close any existing store, gc.
+   - `rmtree(DB_DIR)` with retries.
+   - Create the store from the first 50 chunks.
+   - For remaining chunks, `add_documents` in 50-batches, updating the progress bar.
+6. Wrap in `OptimizedRetriever`, stash in `st.session_state`.
 
-## 6. Sequence: answer a question
+### Asking a question
 
-1. UI: user types a question and submits.
-2. `OptimizedRetriever.get_comprehensive_context(question)`:
-   1. Build up to 5 query variants via `_smart_query_expansion`.
-   2. For the first 3 variants:
-      - `similarity_search(q, k=30)`
-      - `max_marginal_relevance_search(q, k=20, fetch_k=30, lambda_mult=0.6)`
-   3. Dedupe candidates by `md5(chunk.page_content)`.
-   4. Score: count of question terms (length above 2, not in stopword list) appearing in the chunk text, plus 3 if the chunk has a heading.
-   5. Sort by score; take top 15.
-   6. Format each chunk as a labeled excerpt with `Document | Page | Section`.
-3. Build the prompt from `HUMAN_PROMPT.format(context=..., question=...)`.
-4. Send the prompt to OpenRouter via `ChatOpenAI`.
-5. Render the response in the chat panel; append to `messages`.
+1. User types into chat input.
+2. `get_comprehensive_context`:
+   - Expand into up to 5 variants, run the first 3.
+   - For each variant: similarity (k=30) + MMR (k=20).
+   - Dedupe by md5.
+   - Score (term overlap + heading bonus), sort, take 15.
+   - Format each chunk as `Excerpt N | Document: ... | Page: ... | Section: ...`.
+3. Build the prompt: `HUMAN_PROMPT.format(context=..., question=...)`.
+4. Send to OpenRouter via `ChatOpenAI`.
+5. Render response in chat, append to `messages`.
 
-## 7. Failure modes
+## Where it breaks
 
-| Scenario | Behavior |
+| What happens | What the app does |
 |---|---|
-| `OPENROUTER_API_KEY` missing | `get_llm` calls `st.error` then `st.stop`; the user sees the env var hint |
-| Ollama not running | First `OllamaEmbeddings` call raises; the error surfaces in the Streamlit error panel |
-| PDF has no extractable text | `PyPDFLoader` returns empty pages; chunker yields zero chunks; the app shows a warning |
-| Chroma DB directory locked (Windows) | Retry `rmtree` up to 5 times with 1-second backoff |
-| OpenRouter 429 / 5xx | `ChatOpenAI` retries up to 3 times; if it still fails, the exception is rendered via `st.error` |
-| Empty retrieval | Context is empty; the UI shows "No relevant sections found"; the LLM is **not** called |
+| `OPENROUTER_API_KEY` missing | `st.error` plus `st.stop` on first generation attempt |
+| Ollama not running | First embedding call raises; the Streamlit error panel shows the exception |
+| PDF has no text layer | Chunker yields zero chunks; the load succeeds with a misleading "0 chunks" message (known UX bug) |
+| Chroma directory locked (Windows) | `rmtree` retries 5 times with 1 second backoff |
+| OpenRouter 429 or 5xx | `ChatOpenAI` retries 3 times; after that, `st.error` |
+| Empty retrieval | Context string is empty, the LLM is **not** called, UI shows "no relevant sections" |
 
-## 8. Security and privacy
+## Privacy boundary
 
-- The only secret is `OPENROUTER_API_KEY`, read from the environment.
-- Uploaded files are written to OS temp via `tempfile.NamedTemporaryFile` and deleted after loading.
-- Chunk text lives on disk in `./chroma_db_storage/`; the user is responsible for protecting that directory.
-- At answer time, only the top-15 retrieved excerpts plus the question are sent to OpenRouter; the rest of the corpus stays on the host.
-- No telemetry; no analytics; no logs of question content beyond the in-memory chat history.
+This is the one slide I'd show to a security reviewer.
 
-## 9. Performance notes
+- Embeddings: local. Document text never leaves the host at index time.
+- Storage: local. Chunk text lives in `./chroma_db_storage/` on the user's disk. Protect that directory like any other source of sensitive data.
+- Retrieval: local.
+- Generation: third party. The retrieved 15 chunks plus the question go to OpenRouter. Nothing else.
 
-- Embedding cost is one-time per load; persistence covers crash recovery, not incremental indexing (loading a new corpus wipes the store).
-- 15 chunks of 600 chars is roughly 9000 chars or 2000 to 2500 tokens of context. Mistral 7B Instruct handles 8K tokens, leaving comfortable headroom for the prompt template and the answer.
-- The stopword list in scoring is hand-curated. Swapping in a tokenizer-based filter would improve precision on short, common-word questions.
+If a customer can't accept the generation step's third-party hop, swap the generator for local Ollama and you've got a fully on-host pipeline. The cost is generation quality.
 
-## 10. Extension points
+## Things worth doing next
 
-- **Generator swap.** Replace `get_llm()` to call a local Ollama generation model. The rest of the pipeline is unaffected.
-- **PII pre-filter.** Add a redaction pass over `context` before the LLM call to strip PAN, Aadhaar, IFSC, account numbers.
-- **Persistent chat sessions.** Replace `st.session_state.messages` with a sqlite cache to survive page reloads.
-- **Multi-collection.** Promote `COLLECTION_NAME` to per-corpus and add a corpus picker in the sidebar.
+In rough priority order:
 
-## 11. Operational runbook
-
-| Task | Command |
-|---|---|
-| Pull the embedding model | `ollama pull llama3` |
-| Start Ollama | `ollama serve` (or run it as a system service) |
-| Configure the API key | `cp .env.example .env`, edit `.env`, then `set -a; source .env; set +a` |
-| Run the app | `streamlit run app.py` |
-| Reset the index | Click "Clear All" in the sidebar, or `rm -rf ./chroma_db_storage` |
+1. **Don't wipe on Load.** Detect file-hash collisions, skip re-embedding files that are already indexed. This is the single biggest UX improvement.
+2. **PII redaction pre-LLM.** A regex pass over the context (PAN, Aadhaar, IFSC, account numbers). Cheap and reduces the third-party risk meaningfully.
+3. **Generator interface.** Right now `get_llm()` is one function pointing at OpenRouter. Refactor into a `Generator` protocol so swapping to local-only is a one-line change.
+4. **Multi-collection.** Promote `COLLECTION_NAME` to per-corpus, add a corpus picker to the sidebar.

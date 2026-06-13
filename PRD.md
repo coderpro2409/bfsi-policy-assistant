@@ -1,138 +1,104 @@
-# BFSI Policy Assistant: Product Requirements Document
+# BFSI Policy Assistant: PRD
 
-> Version 1.0 - authored alongside the v1 implementation in `app.py`.
+## Why this exists
 
-## 1. Problem
+I work around BFSI policy docs all the time and the failure mode is depressingly consistent: someone needs an answer from a 200-page PDF, they Ctrl+F a phrase that doesn't quite match the document's wording, they give up, and either ask a senior colleague or guess. The "guess" path is what generates the regulatory pain. Ctrl+F is the wrong tool for natural-language questions, and asking the same five people the same five questions doesn't scale.
 
-Banks, insurers, and NBFCs own large bodies of internal policy text: product T&Cs, claim-handling rules, KYC procedures, audit policies. Frontline staff and compliance analysts need fast, citable answers from these documents. Today they choose between three poor options:
+A general-purpose chatbot doesn't fix this either, because the cost of a confident wrong answer is much higher than the cost of "I don't know". Anything we build has to refuse cleanly when the answer isn't in the documents.
 
-1. Search PDFs manually with Ctrl+F, which fails when the question is phrased differently from the document.
-2. Ask a senior colleague, which is slow and creates a knowledge bottleneck.
-3. Use a general-purpose chatbot, which hallucinates or quotes the wrong policy.
+That's the wedge: a RAG assistant whose answer is always grounded in retrieved passages, never in the model's general knowledge, and whose citations point to a specific document, page, and section.
 
-The cost of the wrong answer is real: misquoted clauses lead to regulatory issues, mis-sold products, and customer disputes. A retrieval-augmented assistant that grounds every answer in a specific clause solves the right problem.
+## Who it's for
 
-## 2. Target users
+Three users I had in mind while building this:
 
-| User | Need | Current pain |
-|---|---|---|
-| Frontline support agent | Answer a customer query in under a minute, citing the exact clause | Slow manual search; fear of misquoting |
-| Compliance analyst | Verify that internal procedure X matches policy Y | Cross-document lookup is manual and error-prone |
-| New hire (week one) | Build a mental model of the policy landscape | Onboarding decks lag the real policy text |
+1. **The frontline support agent.** They get a customer question, they have 30 seconds, they need to cite the right clause. Today they fumble through PDFs while the customer waits.
+2. **The compliance analyst.** They're cross-checking whether an internal procedure matches a stated policy. The bottleneck is finding the policy text, not interpreting it.
+3. **The new hire in week one.** Onboarding decks always lag the real policies. They need a way to ask "what does our travel-claim window actually look like" and get the document, not a summary slide.
 
-## 3. Goals (must-have)
+## What "done" looks like for v1
 
-1. Every answer is grounded in retrieved passages from the documents the user actually uploaded. No external knowledge claims.
-2. Every answer is traceable: document name, page number, section heading.
-3. The vector index persists across restarts so re-launching the app does not trigger re-embedding.
-4. The host machine does the embedding work. Document text is not sent to a third party at index time.
-5. The free tier of OpenRouter is sufficient to operate the system for a single user.
+The hard requirements:
 
-## 4. Non-goals (out of scope for v1)
+- Every answer cites at least one document, with page and section heading.
+- The model never makes up content. If retrieval returns nothing useful, the response is some flavor of "I couldn't find that in the documents you uploaded."
+- A single user can run the whole system on their laptop. No server, no Docker, no auth wall. Ollama + Streamlit + an OpenRouter free-tier key.
+- Document text stays on the host at embedding time. The retrieval step never sends documents to a third party.
 
-1. Multi-tenant isolation. The app runs as one user with one corpus.
-2. Real-time corpus updates (webhooks, file watchers).
-3. Fine-tuning on the user's corpus.
-4. Conversation memory across sessions. Each session starts clean.
-5. Multi-language documents. English only.
-6. Tabular or image-heavy documents (charts, scanned PDFs without a text layer).
+What I am explicitly not building in v1:
 
-## 5. User journeys
+- Multi-tenant isolation. One user, one corpus.
+- Real-time corpus updates. Loading is a manual step.
+- Scanned PDFs. If your PDF needs OCR, run OCR first.
+- Conversation memory across sessions. Each session is fresh.
+- Multi-language support. English only.
 
-### 5.1 First-time setup
+A note I want to be honest about: I'd originally written that "the index persists across restarts so you don't re-embed". The code persists the Chroma directory, but the Load button always wipes and rebuilds. So the persistence is really crash recovery, not incremental indexing. Worth fixing in v2; today it's a footnote, not a feature.
 
-1. User installs Ollama and pulls the `llama3` model.
-2. User registers for an OpenRouter account (free tier) and copies the API key.
-3. User copies `.env.example` to `.env`, fills in `OPENROUTER_API_KEY`, sources it, and runs `streamlit run app.py`.
+## How a user gets through the day
 
-### 5.2 Loading a corpus
+The flow is uneventful, which is the point.
 
-1. User opens the app and drags up to 5 files (PDF, DOCX, or TXT, around 40 to 50 pages each) into the upload widget.
-2. User clicks "Load Documents".
-3. The app shows a per-file load progress bar, then chunks and embeds them in batches of 50.
-4. The sidebar surfaces total chunks and pages per file. The app is now ready for questions.
+1. They pull `ollama llama3`, grab an OpenRouter key, put it in `.env`, source it, run `streamlit run app.py`.
+2. They drag up to five files into the upload widget. The hint says 40-50 pages each, which keeps the chunk count below a few thousand and the latency reasonable. They click Load.
+3. While it embeds (around 30 seconds for 250 pages on my laptop), they sip coffee.
+4. They ask a question. The answer arrives with a "Sources Used" expander showing which documents were cited and a "Retrieval Report" expander showing which chunks fed the prompt. The expanders matter: they let the user catch the times the answer is grounded in the wrong source.
 
-### 5.3 Asking a question
+Clearing state is a separate button. I considered making it automatic on file change and decided no, because reuploading the same files is a common debugging move.
 
-1. User types a question, for example "what is the cancellation window for policy X?".
-2. The app expands the query into variations, runs retrieval, and picks the top 15 chunks.
-3. The app calls Mistral 7B via OpenRouter with the retrieved chunks and the question.
-4. The chat panel shows the answer; an expander lists the source documents used; a retrieval report shows which excerpts were chosen.
+## The hard requirements (numbered for traceability)
 
-### 5.4 Clearing state
+Ingestion:
 
-1. User clicks "Clear All".
-2. The Chroma directory is removed; session state is reset; the app returns to the welcome screen.
+- Up to five files per load, in PDF, DOCX, or TXT.
+- Page numbers come from PDF and DOCX loaders. TXT has none.
+- Every chunk carries `source_name`, `file_type`, `doc_id` (uuid), and `processed_date`.
 
-## 6. Functional requirements
+Chunking:
 
-### Ingestion
+- Heading-aware split first. The regex catches numeric prefixes ("1. ", "2.3. "), short ALL-CAPS lines, and Title-Case lines ending in a colon.
+- Within each section, RecursiveCharacterTextSplitter at 600 chars with 150 overlap. Smaller than the usual 1000 because policy text is denser than prose.
+- Every chunk keeps its parent heading.
 
-- **F1.** Accept up to 5 files per load, of types PDF, DOCX, TXT.
-- **F2.** Loaders attach a 1-based page number for PDF and DOCX. Plain text has no page concept.
-- **F3.** Per-file metadata stamps every chunk with `source_name`, `file_type`, `doc_id` (uuid4), and `processed_date`.
+Indexing:
 
-### Chunking
+- Embedding via local Ollama `llama3`.
+- Persistent to `./chroma_db_storage/`, collection `bfsi_documents_full`.
+- Batches of 50 to bound memory.
+- Loading a new corpus wipes the existing collection first.
 
-- **F4.** Heading-aware split first. Detect headings by regex: numeric prefix (`1. `, `2.3. `), ALL-CAPS lines under 100 chars, and Title-Case lines ending with a colon.
-- **F5.** Within each detected section, further split with `RecursiveCharacterTextSplitter` at a target size of 600 characters and 150 character overlap, respecting natural breaks (paragraph, sentence, clause).
-- **F6.** Each chunk carries its parent heading in metadata so citations can render "Section: 4.2 Cancellation Window".
+Retrieval:
 
-### Indexing
+- Up to 5 query variants, first 3 actually run.
+- Each variant does similarity_search (k=30) and MMR (k=20, fetch_k=30, lambda_mult=0.6).
+- Dedupe candidates by md5 of chunk text.
+- Score is `term_overlap + 3 if chunk has a heading`.
+- Top 15 to the prompt.
 
-- **F7.** Embed each chunk with the local Ollama `llama3` model.
-- **F8.** Persist vectors to a Chroma collection at `./chroma_db_storage/` with collection name `bfsi_documents_full`.
-- **F9.** Embed and add in batches of 50 chunks to bound memory.
-- **F10.** Loading a new corpus wipes the existing collection first (no append, no version mismatch).
+Generation:
 
-### Retrieval
+- Mistral 7B Instruct v0.1 via OpenRouter, temperature 0.2, 120 second timeout, 3 retries.
+- Prompt template forbids out-of-context answers and requires inline citations.
 
-- **F11.** Expand the user query into up to 5 variants (full question, top-2 keyword pair, top-3 keyword triple, individual long keywords).
-- **F12.** For the first 3 variants, run both similarity search (k=30) and MMR search (k=20, fetch_k=30, lambda_mult=0.6).
-- **F13.** Deduplicate candidates by MD5 of the chunk content.
-- **F14.** Score each unique candidate as `count_of_question_terms_in_chunk + 3 if chunk_has_heading else 0`. Sort descending.
-- **F15.** Take the top 15 chunks as final context.
+## What I'd watch in production
 
-### Generation
+Numbers I'd want a dashboard for, if this were past v1:
 
-- **F16.** Prompt template instructs the model to answer only from the provided excerpts, cite source and page, and fall back to a "not found" message when the answer is not present.
-- **F17.** Model is `mistralai/mistral-7b-instruct-v0.1` via OpenRouter, temperature 0.2, timeout 120 seconds, up to 3 retries.
+- Retrieval hit rate: does the top-15 contain the gold passage? Target 90% on a held-out set.
+- Citation correctness: every cited section actually exists. Should be 100%; below that and the prompt has drifted.
+- P95 end-to-end latency. On my machine, 250 pages, about 12 seconds. Anything above 20 and something's wrong with Ollama or OpenRouter.
 
-### UI
+## What could go wrong
 
-- **F18.** Sidebar surfaces the file uploader, Load button, Clear button, and per-file stats once loaded.
-- **F19.** Main panel surfaces chat history and chat input.
-- **F20.** Each assistant message exposes a "Sources Used" expander and a "Retrieval Report" expander.
+The four I lose sleep over:
 
-## 7. Non-functional requirements
+1. **OpenRouter goes down or rate-limits me.** The fix is to swap the generator behind a thin interface and fall back to a local Ollama model. Worth doing pre-launch if anyone but me uses this.
+2. **Confidential clauses fly to a third party at answer time.** This is true by design. The retrieved excerpts go to OpenRouter. Future work: a redaction pass over the context before the LLM call (PAN, Aadhaar, IFSC, account numbers).
+3. **The heading regex misfires.** If a body line looks like a heading, the chunker treats it as one and the section bonus gets misapplied. The 100-char length cap mitigates this, not perfectly.
+4. **Someone uploads a scanned PDF.** PyPDFLoader returns empty pages, the chunker yields zero chunks, the user sees "0 chunks" and rightly wonders what happened. Today the warning is too quiet; it should be louder.
 
-- **N1. Privacy boundary.** Document text is embedded locally; only the retrieved top-15 excerpts plus the question are sent to OpenRouter. Users must understand this boundary; the README documents it.
-- **N2. Cost.** The free tier of OpenRouter is sufficient for personal use; prompt size is bounded by the chunk size and top-k.
-- **N3. Resilience.** OpenRouter calls retry up to 3 times. After that the error surfaces to the user, not swallowed.
-- **N4. Latency target.** For a 250-page corpus, an answer should arrive in under 15 seconds on a laptop with 16 GB RAM and Ollama running locally.
-- **N5. Operational simplicity.** No database server, no Docker, no auth layer. One Python process plus Ollama.
+## Open
 
-## 8. Success metrics
-
-| Metric | Target |
-|---|---|
-| Retrieval contains the correct passage in the top 15 | 90% of held-out questions |
-| Citations match real document text (no fabricated quotes) | 100% |
-| User-reported "correct answer" on a 50-question pilot | over 85% |
-| P95 end-to-end latency on a 250-page corpus | under 15 seconds |
-
-## 9. Risks and mitigations
-
-| Risk | Likelihood | Mitigation |
-|---|---|---|
-| OpenRouter outage breaks generation | Medium | Wrap the generator behind a small interface and swap to a local Ollama generator |
-| Confidential clauses go to a third party at answer time | Always true by design | Documented in README; future work to add a PII redaction pass before the LLM call |
-| User uploads scanned PDFs without a text layer | Medium | Detect empty extraction and warn the user; OCR is out of scope for v1 |
-| Free-tier quota exhausted | Low for a single user | Surface 429 verbatim; user can switch keys |
-| Heading regex misclassifies normal lines as headings | Medium | 100-character cap; fall back to the character splitter for oversize sections |
-
-## 10. Open questions
-
-1. Should the retrieval report be hidden by default, or always visible to build user trust?
-2. Do users want a "compare two documents" mode?
-3. Is 15 chunks the right top-k? Today it is a code constant, not a UI control.
+- Should the Retrieval Report be on by default? Today it's behind an expander; I lean toward visible-by-default for the first 10 questions, then collapsible.
+- Top-k of 15 is a code constant. Should it be a slider? My instinct: no, it adds a knob users don't know how to set.
+- Compare-two-documents mode. People have asked. I'd want a real use case before building.

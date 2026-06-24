@@ -16,8 +16,7 @@ import threading
 import webbrowser
 
 # LangChain imports
-from langchain_openai import ChatOpenAI
-from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint, ChatHuggingFace
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -25,12 +24,13 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 # ==================== CONFIGURATION ====================
-# Hosted LLM via OpenRouter (no local Ollama needed for cloud deploy).
-# Set OPENROUTER_API_KEY in your host's secrets (Streamlit Cloud / HF Spaces).
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "mistralai/mistral-7b-instruct:free")
-# Embeddings run in-process on CPU (free, no API key, works on Streamlit Cloud).
+# Fully open-source stack: open-weight LLM served by the Hugging Face Inference
+# API, and open-source embeddings running in-process on CPU. No proprietary
+# services. Set HF_TOKEN in your host's secrets (free token at
+# https://huggingface.co/settings/tokens).
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
+# Open-source embeddings, in-process on CPU (free, no API key, no network).
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 BASE_DIR = Path("./bfsi_multi_tenant")
@@ -124,19 +124,19 @@ def migrate_old_chat_history():
 
 # ==================== LLM / EMBEDDING HELPERS ====================
 def get_llm(temperature=0.1):
-    if not OPENROUTER_API_KEY:
+    if not HF_TOKEN:
         raise RuntimeError(
-            "OPENROUTER_API_KEY is not set. Add it to your host's secrets "
-            "(Streamlit Cloud: App settings -> Secrets). Get a free key at "
-            "https://openrouter.ai/keys"
+            "HF_TOKEN is not set. Add it to your host's secrets. Get a free "
+            "token at https://huggingface.co/settings/tokens"
         )
-    return ChatOpenAI(
-        base_url=OPENROUTER_BASE_URL,
-        api_key=OPENROUTER_API_KEY,
-        model=LLM_MODEL,
-        temperature=temperature,
-        max_tokens=2048,
+    endpoint = HuggingFaceEndpoint(
+        repo_id=LLM_MODEL,
+        task="text-generation",
+        huggingfacehub_api_token=HF_TOKEN,
+        temperature=max(temperature, 0.01),  # HF endpoint requires > 0
+        max_new_tokens=2048,
     )
+    return ChatHuggingFace(llm=endpoint)
 
 # Cache the embedding model so the (~90MB) weights load only once per session.
 _embeddings_cache = None
@@ -1735,7 +1735,7 @@ def main():
         st.markdown('<div class="platform-card"><h2>🏢 Company Portal</h2><p>Register, upload documents, view chat history with client details</p><a href="http://localhost:5000/company" target="_blank" class="platform-button">Open Company Portal</a></div>', unsafe_allow_html=True)
     with col2:
         st.markdown('<div class="platform-card"><h2>👥 Client Portal</h2><p>Register/Login, ask questions to companies, view documents</p><a href="http://localhost:5000/client" target="_blank" class="platform-button">Open Client Portal</a></div>', unsafe_allow_html=True)
-    st.info("📌 **Setup**: This app uses a hosted LLM via OpenRouter. Set `OPENROUTER_API_KEY` in the app's secrets. Embeddings run locally on CPU (no key needed).")
+    st.info("📌 **Setup**: Open-source stack. The LLM is served by the Hugging Face Inference API. Set `HF_TOKEN` in the app's secrets. Embeddings run locally on CPU (no key needed).")
 
 def _startup_init():
     try:

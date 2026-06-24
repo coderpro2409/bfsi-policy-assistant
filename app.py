@@ -16,7 +16,7 @@ import threading
 import webbrowser
 
 # LangChain imports
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint, ChatHuggingFace
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -24,14 +24,12 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 # ==================== CONFIGURATION ====================
-# Fully open-source stack: open-weight LLM served by the Hugging Face Inference
-# API, and open-source embeddings running in-process on CPU. No proprietary
-# services. Set HF_TOKEN in your host's secrets (free token at
-# https://huggingface.co/settings/tokens).
-HF_TOKEN = os.getenv("HF_TOKEN", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
-# Open-source embeddings, in-process on CPU (free, no API key, no network).
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+# Fully self-hosted, open-source: both chat and embeddings are served by Ollama.
+# OLLAMA_BASE_URL points at the Ollama server. In a single-VM / docker-compose
+# deploy it is the "ollama" service; locally it is localhost.
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+LLM_MODEL = os.getenv("LLM_MODEL", "llama3")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
 
 BASE_DIR = Path("./bfsi_multi_tenant")
 BASE_DIR.mkdir(exist_ok=True)
@@ -124,27 +122,18 @@ def migrate_old_chat_history():
 
 # ==================== LLM / EMBEDDING HELPERS ====================
 def get_llm(temperature=0.1):
-    if not HF_TOKEN:
-        raise RuntimeError(
-            "HF_TOKEN is not set. Add it to your host's secrets. Get a free "
-            "token at https://huggingface.co/settings/tokens"
-        )
-    endpoint = HuggingFaceEndpoint(
-        repo_id=LLM_MODEL,
-        task="text-generation",
-        huggingfacehub_api_token=HF_TOKEN,
-        temperature=max(temperature, 0.01),  # HF endpoint requires > 0
-        max_new_tokens=2048,
+    return ChatOllama(
+        base_url=OLLAMA_BASE_URL,
+        model=LLM_MODEL,
+        temperature=temperature,
+        num_predict=2048,
     )
-    return ChatHuggingFace(llm=endpoint)
 
-# Cache the embedding model so the (~90MB) weights load only once per session.
-_embeddings_cache = None
 def get_embeddings():
-    global _embeddings_cache
-    if _embeddings_cache is None:
-        _embeddings_cache = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
-    return _embeddings_cache
+    return OllamaEmbeddings(
+        base_url=OLLAMA_BASE_URL,
+        model=EMBEDDING_MODEL,
+    )
 
 # ==================== SEMANTIC CHUNKER ====================
 class SemanticChunker:
@@ -1735,7 +1724,7 @@ def main():
         st.markdown('<div class="platform-card"><h2>🏢 Company Portal</h2><p>Register, upload documents, view chat history with client details</p><a href="http://localhost:5000/company" target="_blank" class="platform-button">Open Company Portal</a></div>', unsafe_allow_html=True)
     with col2:
         st.markdown('<div class="platform-card"><h2>👥 Client Portal</h2><p>Register/Login, ask questions to companies, view documents</p><a href="http://localhost:5000/client" target="_blank" class="platform-button">Open Client Portal</a></div>', unsafe_allow_html=True)
-    st.info("📌 **Setup**: Open-source stack. The LLM is served by the Hugging Face Inference API. Set `HF_TOKEN` in the app's secrets. Embeddings run locally on CPU (no key needed).")
+    st.info(f"📌 **Setup**: Self-hosted with Ollama at `{OLLAMA_BASE_URL}`. Pull the models first: `ollama pull {LLM_MODEL}` and `ollama pull {EMBEDDING_MODEL}`.")
 
 def _startup_init():
     try:

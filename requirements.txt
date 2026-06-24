@@ -7,15 +7,11 @@ gunicorn>=21.2.0
 # Optional local landing page
 streamlit>=1.30.0
 
-# LangChain stack (open-source LLM via Hugging Face Inference API)
+# LangChain stack (self-hosted LLM + embeddings via Ollama)
 langchain-core>=0.2.0
 langchain-community>=0.2.0
 langchain-text-splitters>=0.2.0
-langchain-huggingface>=0.1.0
-huggingface_hub>=0.24.0
-
-# Embeddings (in-process, CPU)
-sentence-transformers>=2.7.0
+langchain-ollama>=0.1.0
 
 # Vector store
 langchain-chroma>=0.1.0

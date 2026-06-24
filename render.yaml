@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: bfsi-policy-assistant
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # Single worker: retrievers and session state are held in-process.
+    startCommand: gunicorn app:flask_app --bind 0.0.0.0:$PORT --workers 1 --timeout 180
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false          # set this in the Render dashboard (Secret)
+      - key: FLASK_SECRET_KEY
+        generateValue: true  # Render generates a random secret
+      - key: LLM_MODEL
+        value: mistralai/mistral-7b-instruct:free
+      - key: PYTHON_VERSION
+        value: "3.11"

@@ -1,4 +1,10 @@
-# Web UI
+# Web server (the real app is a Flask WSGI app served by gunicorn in the cloud)
+flask>=3.0.0
+flask-cors>=4.0.0
+werkzeug>=3.0.0
+gunicorn>=21.2.0
+
+# Optional local landing page
 streamlit>=1.30.0
 
 # LangChain stack
@@ -6,9 +12,13 @@ langchain-core>=0.2.0
 langchain-community>=0.2.0
 langchain-text-splitters>=0.2.0
 langchain-openai>=0.1.0
-langchain-ollama>=0.1.0
+langchain-huggingface>=0.0.3
+
+# Embeddings (in-process, CPU)
+sentence-transformers>=2.7.0
 
 # Vector store
+langchain-chroma>=0.1.0
 chromadb>=0.4.22
 
 # Document loaders

@@ -16,7 +16,8 @@ import threading
 import webbrowser
 
 # LangChain imports
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_openai import ChatOpenAI
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFLoader, TextLoader, Docx2txtLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -24,9 +25,13 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 # ==================== CONFIGURATION ====================
-OLLAMA_BASE_URL = "http://localhost:11434"
-LLM_MODEL = "llama3"
-EMBEDDING_MODEL = "nomic-embed-text"
+# Hosted LLM via OpenRouter (no local Ollama needed for cloud deploy).
+# Set OPENROUTER_API_KEY in your host's secrets (Streamlit Cloud / HF Spaces).
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "mistralai/mistral-7b-instruct:free")
+# Embeddings run in-process on CPU (free, no API key, works on Streamlit Cloud).
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 
 BASE_DIR = Path("./bfsi_multi_tenant")
 BASE_DIR.mkdir(exist_ok=True)
@@ -117,20 +122,29 @@ def migrate_old_chat_history():
             json.dump(ch, f, indent=2)
         print("✅ Chat history migrated to new format.")
 
-# ==================== OLLAMA HELPERS ====================
+# ==================== LLM / EMBEDDING HELPERS ====================
 def get_llm(temperature=0.1):
-    return ChatOllama(
-        base_url=OLLAMA_BASE_URL,
+    if not OPENROUTER_API_KEY:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set. Add it to your host's secrets "
+            "(Streamlit Cloud: App settings -> Secrets). Get a free key at "
+            "https://openrouter.ai/keys"
+        )
+    return ChatOpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=OPENROUTER_API_KEY,
         model=LLM_MODEL,
         temperature=temperature,
-        num_predict=2048
+        max_tokens=2048,
     )
 
+# Cache the embedding model so the (~90MB) weights load only once per session.
+_embeddings_cache = None
 def get_embeddings():
-    return OllamaEmbeddings(
-        base_url=OLLAMA_BASE_URL,
-        model=EMBEDDING_MODEL
-    )
+    global _embeddings_cache
+    if _embeddings_cache is None:
+        _embeddings_cache = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    return _embeddings_cache
 
 # ==================== SEMANTIC CHUNKER ====================
 class SemanticChunker:
@@ -320,9 +334,11 @@ You are a precise BFSI assistant. Answer the question **only** using the provide
 
 # ==================== FLASK APP ====================
 flask_app = Flask(__name__)
-flask_app.secret_key = 'change-this-secret-key'
+flask_app.secret_key = os.getenv('FLASK_SECRET_KEY', 'change-this-secret-key')
 flask_app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 flask_app.config['SESSION_COOKIE_HTTPONLY'] = True
+# Same-origin in the cloud (Flask serves both the HTML and the /api routes),
+# so CORS origins are only needed for local split-port development.
 CORS(flask_app, supports_credentials=True, origins=['http://localhost:5000', 'http://localhost:8501'])
 
 company_retrievers = {}
@@ -1719,14 +1735,25 @@ def main():
         st.markdown('<div class="platform-card"><h2>🏢 Company Portal</h2><p>Register, upload documents, view chat history with client details</p><a href="http://localhost:5000/company" target="_blank" class="platform-button">Open Company Portal</a></div>', unsafe_allow_html=True)
     with col2:
         st.markdown('<div class="platform-card"><h2>👥 Client Portal</h2><p>Register/Login, ask questions to companies, view documents</p><a href="http://localhost:5000/client" target="_blank" class="platform-button">Open Client Portal</a></div>', unsafe_allow_html=True)
-    st.info("📌 **Prerequisites**: Ollama running with `llama3` and `nomic-embed-text`. Run `ollama serve`, `ollama pull llama3`, `ollama pull nomic-embed-text`")
+    st.info("📌 **Setup**: This app uses a hosted LLM via OpenRouter. Set `OPENROUTER_API_KEY` in the app's secrets. Embeddings run locally on CPU (no key needed).")
+
+def _startup_init():
+    try:
+        migrate_old_chat_history()
+        load_existing_retrievers()
+    except Exception as _e:
+        print(f"Startup init warning: {_e}")
+
+
+# When served by gunicorn (cloud) the module is imported, not run via
+# `streamlit run`, so __name__ != "__main__". Initialise state on import.
+if __name__ != "__main__":
+    _startup_init()
 
 if __name__ == "__main__":
     print("\n" + "="*60)
     print("Migrating old chat history if needed...")
-    migrate_old_chat_history()
-    print("Loading existing vector stores...")
-    load_existing_retrievers()
+    _startup_init()
     print("Starting Flask and Streamlit...")
     print("="*60 + "\n")
     threading.Thread(target=run_flask, daemon=True).start()

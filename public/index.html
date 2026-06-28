@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>BFSI Policy Assistant</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .header h1 { color: #667eea; }
+        .header p { color: #666; margin-top: 6px; }
+        .chat-container {
+            background: white;
+            border-radius: 10px;
+            height: 600px;
+            display: flex;
+            flex-direction: column;
+        }
+        .chat-header {
+            padding: 15px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #ddd;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-radius: 10px 10px 0 0;
+        }
+        .chat-messages { flex: 1; overflow-y: auto; padding: 20px; }
+        .message { margin-bottom: 15px; display: flex; }
+        .message.user { justify-content: flex-end; }
+        .message-content { max-width: 70%; padding: 10px 15px; border-radius: 10px; line-height: 1.5; white-space: pre-wrap; }
+        .message.user .message-content { background: #667eea; color: white; }
+        .message.assistant .message-content { background: #f0f0f0; color: #333; }
+        .chat-input { padding: 20px; border-top: 1px solid #ddd; display: flex; gap: 10px; }
+        .chat-input input { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 15px; }
+        .chat-input button {
+            padding: 10px 20px; background: #667eea; color: white; border: none;
+            border-radius: 5px; cursor: pointer; width: auto;
+        }
+        .chat-input button:hover { background: #5a6fd6; }
+        .sources { font-size: 12px; color: #666; margin-top: 5px; border-top: 1px solid #eee; padding-top: 5px; }
+        .view-docs-btn {
+            background: #28a745; color: white; border: none; padding: 8px 16px;
+            border-radius: 5px; cursor: pointer;
+        }
+        .view-docs-btn:hover { background: #23913d; }
+        .doc-count { background: rgba(255,255,255,.25); border-radius: 999px; padding: 0 7px; margin-left: 6px; font-size: 12px; }
+        .typing-indicator { display: flex; align-items: center; gap: 4px; padding: 10px 15px; }
+        .typing-indicator span { width: 8px; height: 8px; background-color: #999; border-radius: 50%; animation: bounce 1.4s infinite; }
+        .typing-indicator span:nth-child(2) { animation-delay: .2s; }
+        .typing-indicator span:nth-child(3) { animation-delay: .4s; }
+        @keyframes bounce { 0%,60%,100% { transform: translateY(0); } 30% { transform: translateY(-10px); } }
+        .modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.7); }
+        .modal-content {
+            background-color: white; margin: 5% auto; padding: 28px; width: 80%; max-width: 700px;
+            border-radius: 10px; overflow-y: auto; position: relative; max-height: 80%;
+        }
+        .close-modal { position: absolute; right: 22px; top: 14px; font-size: 28px; cursor: pointer; color: #999; }
+        .close-modal:hover { color: #333; }
+        .modal-content h3 { color: #667eea; margin-bottom: 16px; }
+        .drop {
+            border: 2px dashed #c3c8d8; border-radius: 10px; padding: 30px; text-align: center;
+            cursor: pointer; color: #667eea; transition: .15s; display: block; margin-bottom: 18px;
+        }
+        .drop:hover, .drop.over { border-color: #667eea; background: #f3f4fd; }
+        .drop input { display: none; }
+        .drop strong { font-size: 16px; }
+        .drop .hint { color: #999; font-size: 13px; margin-top: 6px; }
+        .doc-row { display: flex; align-items: center; gap: 12px; padding: 11px 14px; border: 1px solid #eee; border-radius: 8px; margin-bottom: 8px; }
+        .doc-row .nm { flex: 1; font-weight: 500; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .doc-row .ch { color: #999; font-size: 12px; }
+        .doc-row .rm { background: #f8d7da; color: #b02a37; border: none; border-radius: 5px; padding: 5px 10px; cursor: pointer; font-size: 13px; }
+        .doc-row .rm:hover { background: #f1aeb5; }
+        .doc-empty { color: #999; text-align: center; padding: 12px 0; }
+        #dstatus { color: #666; font-size: 13px; min-height: 18px; margin-top: 6px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏦 BFSI Policy Assistant</h1>
+            <p>Ask questions about your policies and documents</p>
+        </div>
+        <div class="chat-container">
+            <div class="chat-header">
+                <strong>Customer Support</strong>
+                <button class="view-docs-btn" onclick="openDocs()">📄 Documents<span class="doc-count" id="docCount">0</span></button>
+            </div>
+            <div class="chat-messages" id="chatMessages">
+                <div class="message assistant"><div class="message-content">Hello! Add your documents using the Documents button above, then ask me anything about them.</div></div>
+            </div>
+            <div class="chat-input">
+                <input type="text" id="questionInput" placeholder="Type your question..." onkeypress="if(event.key==='Enter') askQuestion()">
+                <button onclick="askQuestion()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="docModal" class="modal">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeDocs()">&times;</span>
+            <h3>Documents</h3>
+            <label class="drop" id="drop">
+                <input type="file" id="file" accept=".pdf,.docx,.txt" multiple>
+                <div><strong>Add documents</strong></div>
+                <div class="hint">PDF, DOCX, TXT &middot; click or drop &middot; processed in your browser</div>
+            </label>
+            <div id="docList"></div>
+            <div id="dstatus"></div>
+        </div>
+    </div>
+
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.8.0/mammoth.browser.min.js"></script>
+<script type="module">
+  // Open-source LLM running fully in the browser via WebLLM (WebGPU).
+  // No API key, no account, no server. The model is downloaded once and cached.
+  import * as webllm from "https://esm.run/@mlc-ai/web-llm";
+  const MODEL = "Llama-3.2-1B-Instruct-q4f16_1-MLC"; // ~0.9GB, small enough for low-RAM machines
+  let engine = null, loading = null;
+  window.modelReady = false;
+  window.loadModel = async (onProgress) => {
+    if (engine) return engine;
+    if (!navigator.gpu) throw new Error("This browser has no WebGPU. Open the page in the latest Chrome or Edge to run the local model.");
+    if (!loading) loading = webllm.CreateMLCEngine(MODEL, { initProgressCallback: (r) => onProgress && onProgress(r.text) });
+    engine = await loading;
+    window.modelReady = true;
+    return engine;
+  };
+  window.generateAnswer = async (prompt, onProgress) => {
+    const eng = await window.loadModel(onProgress);
+    const reply = await eng.chat.completions.create({
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.1, max_tokens: 1024,
+    });
+    return (reply.choices?.[0]?.message?.content || "").trim();
+  };
+</script>
+<script>
+  if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+
+  const $ = (id) => document.getElementById(id);
+  const STORE_KEY = "bfsi_docs_v1";
+  // docs: { name -> { chunks:[{text,source,page,heading}] } }
+  let docs = load();
+
+  function load(){ try { return JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch { return {}; } }
+  function save(){ try { localStorage.setItem(STORE_KEY, JSON.stringify(docs)); } catch(e){ dstatus("Storage full, remove a document.", true); } }
+  function dstatus(t, bad){ const el=$("dstatus"); el.textContent=t; el.style.color = bad ? "#b02a37" : "#666"; }
+  function esc(s){ return (s||"").replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+  // ---- chunking (CHUNK=1000, OVERLAP=200) ----
+  const CHUNK = 1000, OVERLAP = 200;
+  function extractHeading(text){
+    for (const raw of text.split("\n").slice(0,5)) {
+      const l = raw.trim();
+      if (/^\d+\.\s+/.test(l) || (l === l.toUpperCase() && l.length > 2 && l.length < 80) || l.endsWith(":")) return l;
+    }
+    return null;
+  }
+  function chunkText(text, source, page, out){
+    text = (text||"").replace(/\r/g,"");
+    let i = 0;
+    while (i < text.length) {
+      const slice = text.slice(i, i+CHUNK).trim();
+      if (slice.length > 40) out.push({ text:slice, source, page, heading:extractHeading(slice) });
+      i += CHUNK - OVERLAP;
+    }
+  }
+
+  async function parseFile(file){
+    const ext = file.name.split(".").pop().toLowerCase();
+    const out = [];
+    if (ext === "pdf") {
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+      for (let p = 1; p <= pdf.numPages; p++) {
+        const page = await pdf.getPage(p);
+        const tc = await page.getTextContent();
+        const txt = tc.items.map(it => it.str).join(" ").replace(/\s+/g," ");
+        if (txt.trim()) chunkText(txt, file.name, p, out);
+      }
+    } else if (ext === "docx") {
+      const buf = await file.arrayBuffer();
+      const { value } = await mammoth.extractRawText({ arrayBuffer: buf });
+      chunkText(value, file.name, null, out);
+    } else {
+      chunkText(await file.text(), file.name, null, out);
+    }
+    return out;
+  }
+
+  // ---- retrieval (keyword ranking, top 15) ----
+  const STOP = new Set("how what when where why will does do is are was were the a an and or but to for of with by from up about into through during if this that these those on at as it its".split(" "));
+  const FINAL = 15;
+  function allChunks(){ return Object.values(docs).flatMap(d => d.chunks); }
+  function retrieve(question){
+    const terms = [...new Set(question.toLowerCase().split(/\W+/).filter(t => t.length > 2 && !STOP.has(t)))];
+    const scored = allChunks().map(c => {
+      const lc = c.text.toLowerCase();
+      const termScore = terms.reduce((n,t) => n + (lc.includes(t) ? 1 : 0), 0);
+      return { c, score: termScore + (c.heading ? 3 : 0) };
+    }).filter(s => s.score > 0).sort((a,b) => b.score - a.score).slice(0, FINAL);
+    const top = scored.map(s => s.c);
+    const context = top.map((c,i) => {
+      const ref = `**${c.source}**` + (c.page ? `, page ${c.page}` : "") + (c.heading ? `, section: ${c.heading}` : "");
+      return `**Excerpt ${i+1}**\n${ref}\n${c.text}\n`;
+    }).join("\n");
+    const sources = [...new Set(top.map(c => c.source + (c.page ? `, page ${c.page}` : "")))];
+    return { context, sources };
+  }
+
+  // Grounded-answer prompt (the original strict, quote-only instruction).
+  const HUMAN_PROMPT = (context, question) => `You are a precise BFSI assistant. Answer the question **only** using the provided document excerpts.
+
+**ABSOLUTE RULES:**
+1. **NEVER use "..." (ellipsis).** Quote full sentences or complete clauses.
+2. **NEVER say "it can be inferred that"** - if the document does not directly state something, say: "The documents do not explicitly state this. They do say: [full quote of relevant clause]."
+3. **Always quote the exact text** from the excerpts. Use quotation marks and cite the document name and page number.
+4. **If the answer is not in the excerpts**, say exactly: "I cannot find that information in the provided documents."
+5. **Do not summarize** - let the document speak for itself.
+
+**Excerpts:**
+${context}
+
+**Question:** ${question}
+
+**Answer (full quotes, no ellipsis, no inferences):**`;
+
+  // ---- documents modal ----
+  function refreshCount(){ $("docCount").textContent = Object.keys(docs).length; }
+  function renderDocs(){
+    const list = $("docList");
+    const names = Object.keys(docs);
+    list.innerHTML = names.length ? names.map(n => `
+      <div class="doc-row">
+        <div class="nm" title="${esc(n)}">${esc(n)}</div>
+        <div class="ch">${docs[n].chunks.length} chunks</div>
+        <button class="rm" data-name="${esc(n)}">Remove</button>
+      </div>`).join("") : `<div class="doc-empty">No documents yet. Add one above.</div>`;
+    list.querySelectorAll(".rm").forEach(b => b.addEventListener("click", () => {
+      delete docs[b.dataset.name]; save(); renderDocs(); refreshCount(); dstatus("Removed.");
+    }));
+    refreshCount();
+  }
+  window.openDocs = () => { renderDocs(); dstatus(""); $("docModal").style.display = "block"; };
+  window.closeDocs = () => { $("docModal").style.display = "none"; };
+  window.onclick = (e) => { if (e.target === $("docModal")) closeDocs(); };
+
+  async function handleFiles(files){
+    for (const f of files) {
+      const ext = f.name.split(".").pop().toLowerCase();
+      if (!["pdf","docx","txt"].includes(ext)) { dstatus(`Skipped ${f.name} (unsupported).`, true); continue; }
+      dstatus(`Parsing ${f.name}...`);
+      try {
+        const chunks = await parseFile(f);
+        if (!chunks.length) { dstatus(`No text found in ${f.name}.`, true); continue; }
+        docs[f.name] = { chunks }; save(); renderDocs();
+        dstatus(`Indexed ${f.name}: ${chunks.length} chunks.`);
+      } catch(e){ dstatus(`Failed on ${f.name}: ${e.message || e}`, true); }
+    }
+  }
+
+  const drop = $("drop");
+  $("file").addEventListener("change", e => { handleFiles([...e.target.files]); e.target.value=""; });
+  ["dragover","dragenter"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add("over"); }));
+  ["dragleave","drop"].forEach(ev => drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove("over"); }));
+  drop.addEventListener("drop", e => handleFiles([...e.dataTransfer.files]));
+
+  // ---- chat ----
+  function addMessage(role, html){
+    const c = $("chatMessages");
+    const div = document.createElement("div");
+    div.className = "message " + role;
+    div.innerHTML = `<div class="message-content">${html}</div>`;
+    c.appendChild(div); c.scrollTop = c.scrollHeight;
+    return div;
+  }
+  function addTyping(){
+    const c = $("chatMessages");
+    const div = document.createElement("div");
+    div.className = "message assistant";
+    div.innerHTML = `<div class="message-content"><div class="typing-indicator"><span></span><span></span><span></span></div></div>`;
+    c.appendChild(div); c.scrollTop = c.scrollHeight;
+    return div;
+  }
+
+  window.askQuestion = async () => {
+    const input = $("questionInput");
+    const question = input.value.trim();
+    if (!question) return;
+    input.value = "";
+    addMessage("user", esc(question));
+
+    if (!Object.keys(docs).length) {
+      addMessage("assistant", "Please add your documents first using the 📄 Documents button above, then ask away.");
+      return;
+    }
+
+    const { context, sources } = retrieve(question);
+    const typing = addTyping();
+    const bubble = typing.querySelector(".message-content");
+
+    if (!context) {
+      bubble.innerHTML = "I cannot find that information in the provided documents.";
+      return;
+    }
+    try {
+      const prompt = HUMAN_PROMPT(context.slice(0, 18000), question);
+      const onProgress = (txt) => {
+        if (!window.modelReady) bubble.innerHTML = `<span style="color:#666">Loading the local model (first time only)...<br>${esc(txt)}</span>`;
+      };
+      const answer = await window.generateAnswer(prompt, onProgress);
+      let html = esc(answer || "I cannot find that information in the provided documents.");
+      if (sources.length) html += `<div class="sources">📚 Sources: ${esc(sources.join(", "))}</div>`;
+      bubble.innerHTML = html;
+    } catch(e){
+      bubble.innerHTML = `<span style="color:#b02a37">${esc(e.message || String(e))}</span>`;
+    }
+    $("chatMessages").scrollTop = $("chatMessages").scrollHeight;
+  };
+
+  refreshCount();
+</script>
+</body>
+</html>
